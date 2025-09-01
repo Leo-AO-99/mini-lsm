@@ -30,6 +30,7 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::merge_iterator::MergeIterator;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
@@ -326,13 +327,14 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let state = self.state.read();
-        state.memtable.put(key, value)?;
-
-        if state.memtable.approximate_size() > self.options.target_sst_size {
-            drop(state);
-            self.force_freeze_memtable(&self.state_lock.lock())?;
+        let size;
+        {
+            let guard = self.state.read();
+            guard.memtable.put(key, value)?;
+            size = guard.memtable.approximate_size();
         }
+
+        self.try_freeze(size)?;
 
         Ok(())
     }
@@ -340,6 +342,19 @@ impl LsmStorageInner {
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
         self.put(key, b"")
+    }
+
+    fn try_freeze(&self, estimated_size: usize) -> Result<()> {
+        if estimated_size >= self.options.target_sst_size {
+            let state_lock = self.state_lock.lock();
+            let guard = self.state.read();
+            // the memtable could have already been frozen, check again to ensure we really need to freeze
+            if guard.memtable.approximate_size() >= self.options.target_sst_size {
+                drop(guard);
+                self.force_freeze_memtable(&state_lock)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
@@ -387,9 +402,22 @@ impl LsmStorageInner {
     /// Create an iterator over a range of keys.
     pub fn scan(
         &self,
-        _lower: Bound<&[u8]>,
-        _upper: Bound<&[u8]>,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        unimplemented!()
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        }; // drop global lock here
+
+        let mut memtable_iters = Vec::with_capacity(snapshot.imm_memtables.len() + 1);
+        // merge memtable and immutable memtables
+        // memtable is the first one, which is the latest one
+        memtable_iters.push(Box::new(snapshot.memtable.scan(lower, upper)));
+        for memtable in snapshot.imm_memtables.iter() {
+            memtable_iters.push(Box::new(memtable.scan(lower, upper)));
+        }
+        let iter = MergeIterator::create(memtable_iters);
+        Ok(FusedIterator::new(LsmIterator::new(iter)?))
     }
 }
