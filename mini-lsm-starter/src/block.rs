@@ -12,15 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 mod builder;
 mod iterator;
 
 pub use builder::BlockBuilder;
-use bytes::Bytes;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub use iterator::BlockIterator;
+
+pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
 
 /// A block is the smallest unit of read and caching in LSM tree. It is a collection of sorted key-value pairs.
 pub struct Block {
@@ -28,15 +27,57 @@ pub struct Block {
     pub(crate) offsets: Vec<u16>,
 }
 
+impl std::fmt::Debug for Block {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Block {{")?;
+        for (idx, offset) in self.offsets.iter().enumerate() {
+            let mut entry = &self.data[*offset as usize..];
+            let key_len = entry.get_u16() as usize;
+            let key = &entry[..key_len];
+            entry.advance(key_len);
+            let value_len = entry.get_u16() as usize;
+            let value = &entry[..value_len];
+            writeln!(
+                f,
+                "  [{idx}] key: {:?}, value: {:?}",
+                String::from_utf8_lossy(key),
+                String::from_utf8_lossy(value)
+            )?;
+        }
+        write!(f, "}}")
+    }
+}
+
 impl Block {
     /// Encode the internal data to the data layout illustrated in the course
     /// Note: You may want to recheck if any of the expected field is missing from your output
     pub fn encode(&self) -> Bytes {
-        unimplemented!()
+        let num_of_elements = self.offsets.len();
+        let mut buf =
+            BytesMut::with_capacity(self.data.len() + num_of_elements * SIZEOF_U16 + SIZEOF_U16);
+
+        buf.put_slice(&self.data);
+
+        for offset in &self.offsets {
+            buf.put_u16(*offset);
+        }
+
+        buf.put_u16(num_of_elements as u16);
+        buf.into()
     }
 
     /// Decode from the data layout, transform the input `data` to a single `Block`
     pub fn decode(data: &[u8]) -> Self {
-        unimplemented!()
+        let num_of_elements = (&data[data.len() - SIZEOF_U16..]).get_u16() as usize;
+        let data_end = data.len() - 2 - num_of_elements * SIZEOF_U16;
+        let offsets_raw = &data[data_end..data.len() - SIZEOF_U16];
+        // get offset array
+        let offsets = offsets_raw
+            .chunks(SIZEOF_U16)
+            .map(|mut x| x.get_u16())
+            .collect();
+        // retrieve data
+        let data = data[0..data_end].to_vec();
+        Self { data, offsets }
     }
 }
