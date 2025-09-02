@@ -108,6 +108,13 @@ impl BlockIterator {
         self.seek_to_idx(self.idx + 1);
     }
 
+    pub fn prev(&mut self) {
+        if self.idx == 0 {
+            return;
+        }
+        self.seek_to_idx(self.idx - 1);
+    }
+
     fn kv_at_idx(&self, idx: usize) -> (KeySlice, (usize, usize)) {
         let offset = self.block.offsets[idx] as usize;
         let mut entry = &self.block.data[offset..];
