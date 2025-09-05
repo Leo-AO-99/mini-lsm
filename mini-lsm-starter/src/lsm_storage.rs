@@ -173,7 +173,13 @@ impl Drop for MiniLsm {
 
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
-        unimplemented!()
+        self.flush_notifier.send(()).ok();
+
+        if let Some(handle) = self.flush_thread.lock().take() {
+            handle.join().map_err(|_| anyhow::anyhow!("Failed to join flush thread"))?;
+        }
+        
+        Ok(())
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
