@@ -15,27 +15,57 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
+use std::ops::Bound;
+
 use anyhow::{Result, bail};
+use bytes::Bytes;
 
 use crate::{
-    iterators::{StorageIterator, merge_iterator::MergeIterator},
+    iterators::{
+        StorageIterator, merge_iterator::MergeIterator, two_merge_iterator::TwoMergeIterator,
+    },
     mem_table::MemTableIterator,
+    table::SsTableIterator,
 };
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the course for multiple times.
-type LsmIteratorInner = MergeIterator<MemTableIterator>;
+type LsmIteratorInner =
+    TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>;
 
 pub struct LsmIterator {
     inner: LsmIteratorInner,
+    is_valid: bool, // even kv is valid, if the key is greater than end_bound, the iterator is invalid
+    end_bound: Bound<Bytes>,
 }
 
 impl LsmIterator {
-    pub(crate) fn new(iter: LsmIteratorInner) -> Result<Self> {
-        let mut lsm_iter = Self { inner: iter };
-        while lsm_iter.inner.is_valid() && lsm_iter.inner.value().is_empty() {
-            lsm_iter.inner.next()?;
+    pub(crate) fn new(iter: LsmIteratorInner, end_bound: Bound<Bytes>) -> Result<Self> {
+        let mut lsm_iter = Self {
+            inner: iter,
+            is_valid: true,
+            end_bound,
+        };
+        while lsm_iter.is_valid() && lsm_iter.inner.value().is_empty() {
+            lsm_iter.next_inner()?;
         }
         Ok(lsm_iter)
+    }
+
+    fn next_inner(&mut self) -> Result<()> {
+        self.inner.next()?;
+
+        if !self.inner.is_valid() {
+            self.is_valid = false;
+            return Ok(());
+        }
+
+        match self.end_bound.as_ref() {
+            Bound::Unbounded => {}
+            Bound::Included(key) => self.is_valid = self.inner.key().raw_ref() <= key.as_ref(),
+            Bound::Excluded(key) => self.is_valid = self.inner.key().raw_ref() < key.as_ref(),
+        }
+
+        Ok(())
     }
 }
 
@@ -43,7 +73,7 @@ impl StorageIterator for LsmIterator {
     type KeyType<'a> = &'a [u8];
 
     fn is_valid(&self) -> bool {
-        self.inner.is_valid()
+        self.is_valid
     }
 
     fn key(&self) -> &[u8] {
@@ -57,8 +87,8 @@ impl StorageIterator for LsmIterator {
     fn next(&mut self) -> Result<()> {
         self.inner.next()?;
         // skip empty value
-        while self.inner.is_valid() && self.inner.value().is_empty() {
-            self.inner.next()?;
+        while self.is_valid() && self.inner.value().is_empty() {
+            self.next_inner()?;
         }
 
         Ok(())

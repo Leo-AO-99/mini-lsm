@@ -30,12 +30,15 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::StorageIterator as _;
 use crate::iterators::merge_iterator::MergeIterator;
+use crate::iterators::two_merge_iterator::TwoMergeIterator;
+use crate::key::KeySlice;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
-use crate::mem_table::MemTable;
+use crate::mem_table::{MemTable, map_bound};
 use crate::mvcc::LsmMvccInner;
-use crate::table::SsTable;
+use crate::table::{SsTable, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -299,24 +302,47 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        let state = self.state.read();
-        let v = state.memtable.get(key);
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        };
 
-        if let Some(value) = v {
+        // 1. memtable
+        if let Some(value) = snapshot.memtable.get(key) {
             if value.is_empty() {
                 return Ok(None);
             }
             return Ok(Some(value));
         }
 
-        for memtable in state.imm_memtables.iter() {
-            if let Some(value) = memtable.get(key) {
+        // 2. imm_memtabls
+        for table in snapshot.imm_memtables.iter() {
+            if let Some(value) = table.get(key) {
                 if value.is_empty() {
                     return Ok(None);
                 }
                 return Ok(Some(value));
             }
         }
+
+        // 3. l0_sstables
+        let mut table_iters = Vec::with_capacity(snapshot.l0_sstables.len());
+        for table_id in snapshot.l0_sstables.iter() {
+            let table = snapshot.sstables[table_id].clone();
+            table_iters.push(Box::new(SsTableIterator::create_and_seek_to_key(
+                table,
+                KeySlice::from_slice(key),
+            )?));
+        }
+
+        let table_iter = MergeIterator::create(table_iters);
+        if table_iter.is_valid()
+            && table_iter.key().raw_ref() == key
+            && !table_iter.value().is_empty()
+        {
+            return Ok(Some(Bytes::copy_from_slice(table_iter.value())));
+        }
+
         Ok(None)
     }
 
@@ -417,7 +443,36 @@ impl LsmStorageInner {
         for memtable in snapshot.imm_memtables.iter() {
             memtable_iters.push(Box::new(memtable.scan(lower, upper)));
         }
-        let iter = MergeIterator::create(memtable_iters);
-        Ok(FusedIterator::new(LsmIterator::new(iter)?))
+        let memtable_iter = MergeIterator::create(memtable_iters);
+
+        let mut sstable_iters = Vec::with_capacity(snapshot.l0_sstables.len());
+        for sstable_id in snapshot.l0_sstables.iter() {
+            let sstable = snapshot.sstables[sstable_id].clone();
+            let iter = match lower {
+                Bound::Included(key) => {
+                    SsTableIterator::create_and_seek_to_key(sstable, KeySlice::from_slice(key))?
+                }
+                Bound::Excluded(key) => {
+                    let mut iter = SsTableIterator::create_and_seek_to_key(
+                        sstable,
+                        KeySlice::from_slice(key),
+                    )?;
+                    if iter.is_valid() && iter.key() == KeySlice::from_slice(key) {
+                        iter.next()?;
+                    }
+                    iter
+                }
+                Bound::Unbounded => SsTableIterator::create_and_seek_to_first(sstable)?,
+            };
+            sstable_iters.push(Box::new(iter));
+        }
+
+        let sstable_iter = MergeIterator::create(sstable_iters);
+
+        let iter = TwoMergeIterator::create(memtable_iter, sstable_iter)?;
+        Ok(FusedIterator::new(LsmIterator::new(
+            iter,
+            map_bound(upper),
+        )?))
     }
 }
