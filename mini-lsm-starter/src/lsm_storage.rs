@@ -38,7 +38,7 @@ use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::{MemTable, map_bound};
 use crate::mvcc::LsmMvccInner;
-use crate::table::{SsTable, SsTableIterator};
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -260,6 +260,10 @@ impl LsmStorageInner {
     /// not exist.
     pub(crate) fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Self> {
         let path = path.as_ref();
+
+        // make sure the database directory exists
+        std::fs::create_dir_all(path)?;
+
         let state = LsmStorageState::create(&options);
 
         let compaction_controller = match &options.compaction_options {
@@ -417,7 +421,38 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
-        unimplemented!()
+        let state_lock = self.state_lock.lock();
+
+        // Select a memtable to flush.
+        let imm_memtable = {
+            let guard = self.state.read();
+            guard
+                .imm_memtables
+                .last()
+                .expect("imm_memtables is empty")
+                .clone()
+        };
+
+        // Create an SST file corresponding to a memtable.
+        let mut builder = SsTableBuilder::new(self.options.block_size);
+        imm_memtable.flush(&mut builder)?;
+
+        let sstable = builder.build(
+            imm_memtable.id(),
+            Some(self.block_cache.clone()),
+            self.path_of_sst(imm_memtable.id()),
+        )?;
+
+        // Remove the memtable from the immutable memtable list and add the SST file to L0 SSTs.
+        {
+            let mut guard = self.state.write();
+            let state = Arc::make_mut(&mut guard);
+            state.imm_memtables.pop();
+            state.l0_sstables.insert(0, sstable.sst_id());
+            state.sstables.insert(sstable.sst_id(), Arc::new(sstable));
+        }
+
+        Ok(())
     }
 
     pub fn new_txn(&self) -> Result<()> {
