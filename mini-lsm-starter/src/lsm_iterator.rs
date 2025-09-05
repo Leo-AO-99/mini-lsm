@@ -85,7 +85,7 @@ impl StorageIterator for LsmIterator {
     }
 
     fn next(&mut self) -> Result<()> {
-        self.inner.next()?;
+        self.next_inner()?;
         // skip empty value
         while self.is_valid() && self.inner.value().is_empty() {
             self.next_inner()?;
