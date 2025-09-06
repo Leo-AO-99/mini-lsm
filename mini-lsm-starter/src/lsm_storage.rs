@@ -176,9 +176,11 @@ impl MiniLsm {
         self.flush_notifier.send(()).ok();
 
         if let Some(handle) = self.flush_thread.lock().take() {
-            handle.join().map_err(|_| anyhow::anyhow!("Failed to join flush thread"))?;
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("Failed to join flush thread"))?;
         }
-        
+
         Ok(())
     }
 
@@ -339,6 +341,9 @@ impl LsmStorageInner {
         let mut table_iters = Vec::with_capacity(snapshot.l0_sstables.len());
         for table_id in snapshot.l0_sstables.iter() {
             let table = snapshot.sstables[table_id].clone();
+            if !key_within(key, table.first_key().raw_ref(), table.last_key().raw_ref()) {
+                continue;
+            }
             table_iters.push(Box::new(SsTableIterator::create_and_seek_to_key(
                 table,
                 KeySlice::from_slice(key),
@@ -486,9 +491,18 @@ impl LsmStorageInner {
         }
         let memtable_iter = MergeIterator::create(memtable_iters);
 
+        // skip the SSTs that is impossible to contain the key/key range.
         let mut sstable_iters = Vec::with_capacity(snapshot.l0_sstables.len());
         for sstable_id in snapshot.l0_sstables.iter() {
             let sstable = snapshot.sstables[sstable_id].clone();
+            if !range_overlap(
+                sstable.first_key().raw_ref(),
+                sstable.last_key().raw_ref(),
+                lower,
+                upper,
+            ) {
+                continue;
+            }
             let iter = match lower {
                 Bound::Included(key) => {
                     SsTableIterator::create_and_seek_to_key(sstable, KeySlice::from_slice(key))?
@@ -516,4 +530,29 @@ impl LsmStorageInner {
             map_bound(upper),
         )?))
     }
+}
+
+fn range_overlap(
+    first_key: &[u8],
+    last_key: &[u8],
+    lower: Bound<&[u8]>,
+    upper: Bound<&[u8]>,
+) -> bool {
+    match lower {
+        Bound::Included(bound) if last_key < bound => return false,
+        Bound::Excluded(bound) if last_key <= bound => return false,
+        _ => {}
+    };
+
+    match upper {
+        Bound::Included(bound) if first_key > bound => return false,
+        Bound::Excluded(bound) if first_key >= bound => return false,
+        _ => {}
+    };
+
+    true
+}
+
+fn key_within(key: &[u8], first_key: &[u8], last_key: &[u8]) -> bool {
+    first_key <= key && key <= last_key
 }
