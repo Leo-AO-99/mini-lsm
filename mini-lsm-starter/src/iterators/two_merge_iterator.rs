@@ -57,13 +57,11 @@ impl<
             } else {
                 CurrentIterator::A
             }
+        } else if self.b.is_valid() {
+            CurrentIterator::B
         } else {
-            if self.b.is_valid() {
-                CurrentIterator::B
-            } else {
-                // although it is a, it is also invalid
-                CurrentIterator::A
-            }
+            // although it is a, it is also invalid
+            CurrentIterator::A
         };
 
         self.current = current;
@@ -101,18 +99,14 @@ impl<
     fn next(&mut self) -> Result<()> {
         match self.current {
             CurrentIterator::A => {
-                if self.a.is_valid() && self.b.is_valid() {
-                    if self.a.key() == self.b.key() {
-                        self.b.next()?;
-                    }
+                if self.a.is_valid() && self.b.is_valid() && self.a.key() == self.b.key() {
+                    self.b.next()?;
                 }
                 self.a.next()?
             }
             CurrentIterator::B => {
-                if self.a.is_valid() && self.b.is_valid() {
-                    if self.a.key() == self.b.key() {
-                        self.a.next()?;
-                    }
+                if self.a.is_valid() && self.b.is_valid() && self.a.key() == self.b.key() {
+                    self.a.next()?;
                 }
                 self.b.next()?
             }

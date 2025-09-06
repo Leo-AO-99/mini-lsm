@@ -234,7 +234,7 @@ impl SsTable {
         let mut left = 0;
         let mut right = self.block_meta.len() - 1;
         while left < right {
-            let mid = left + right + 1 >> 1;
+            let mid = (left + right + 1) >> 1;
             let first_key = self.block_meta[mid].first_key.as_key_slice();
             if first_key <= key {
                 left = mid;

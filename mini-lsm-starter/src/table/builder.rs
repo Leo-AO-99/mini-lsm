@@ -39,15 +39,14 @@ pub struct SsTableBuilder {
 impl SsTableBuilder {
     /// Create a builder based on target block size.
     pub fn new(block_size: usize) -> Self {
-        let builder = Self {
+        Self {
             builder: BlockBuilder::new(block_size),
             first_key: Vec::new(),
             last_key: Vec::new(),
             data: Vec::new(),
             meta: Vec::new(),
             block_size,
-        };
-        builder
+        }
     }
 
     /// Flush the current block builder, and clear first_key and last_key
@@ -57,12 +56,8 @@ impl SsTableBuilder {
             .encode();
         self.meta.push(BlockMeta {
             offset: self.data.len(),
-            first_key: KeyBytes::from_bytes(
-                std::mem::replace(&mut self.first_key, Vec::new()).into(),
-            ),
-            last_key: KeyBytes::from_bytes(
-                std::mem::replace(&mut self.last_key, Vec::new()).into(),
-            ),
+            first_key: KeyBytes::from_bytes(std::mem::take(&mut self.first_key).into()),
+            last_key: KeyBytes::from_bytes(std::mem::take(&mut self.last_key).into()),
         });
         self.data.extend_from_slice(&block);
     }
@@ -112,7 +107,7 @@ impl SsTableBuilder {
         buf.put_u32(block_meta_offset as u32);
         let file = FileObject::create(path.as_ref(), buf)?;
         Ok(SsTable {
-            file: file,
+            file,
             block_meta_offset,
             id,
             block_cache,
