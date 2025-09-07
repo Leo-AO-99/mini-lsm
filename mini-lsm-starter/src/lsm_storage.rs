@@ -344,6 +344,11 @@ impl LsmStorageInner {
             if !key_within(key, table.first_key().raw_ref(), table.last_key().raw_ref()) {
                 continue;
             }
+            if let Some(bloom) = &table.bloom {
+                if !bloom.may_contain(farmhash::fingerprint32(key)) {
+                    continue;
+                }
+            }
             table_iters.push(Box::new(SsTableIterator::create_and_seek_to_key(
                 table,
                 KeySlice::from_slice(key),

@@ -153,17 +153,35 @@ impl SsTable {
 
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
-        const EXTRA_FIELD_SIZE: u64 = std::mem::size_of::<u32>() as u64;
+        const OFFSET_SIZE: u64 = std::mem::size_of::<u32>() as u64;
         let file_length = file.size();
+
+        // -----------------------------------------------------------------------------------------------------
+        // |         Block Section         |                            Meta Section                           |
+        // -----------------------------------------------------------------------------------------------------
+        // | data block | ... | data block | metadata | meta block offset | bloom filter | bloom filter offset |
+        // |                               |  varlen  |         u32       |    varlen    |        u32          |
+        // -----------------------------------------------------------------------------------------------------
+
+        // bloom filter
+        let bloom_offset = {
+            let buf = file.read(file_length - OFFSET_SIZE, OFFSET_SIZE)?;
+            (&buf[..]).get_u32() as u64
+        };
+        let bloom = {
+            let buf = file.read(bloom_offset, file_length - bloom_offset - OFFSET_SIZE)?;
+            Bloom::decode(&buf[..])?
+        };
+
         let block_meta_offset = {
-            let buf = file.read(file_length - EXTRA_FIELD_SIZE, EXTRA_FIELD_SIZE)?;
+            let buf = file.read(bloom_offset - OFFSET_SIZE, OFFSET_SIZE)?;
             (&buf[..]).get_u32() as u64
         };
 
         let block_meta = {
             let buf = file.read(
                 block_meta_offset,
-                file_length - block_meta_offset - EXTRA_FIELD_SIZE,
+                bloom_offset - block_meta_offset - OFFSET_SIZE,
             )?;
             BlockMeta::decode_block_meta(&buf[..])
         };
@@ -176,7 +194,7 @@ impl SsTable {
             first_key: block_meta.first().unwrap().first_key.clone(),
             last_key: block_meta.last().unwrap().last_key.clone(),
             block_meta,
-            bloom: None,
+            bloom: Some(bloom),
             max_ts: 0,
         })
     }
@@ -231,6 +249,7 @@ impl SsTable {
     /// Note: You may want to make use of the `first_key` stored in `BlockMeta`.
     /// You may also assume the key-value pairs stored in each consecutive block are sorted.
     pub fn find_block_idx(&self, key: KeySlice) -> usize {
+        // this is only a binary search, don't need to check bloom filter
         let mut left = 0;
         let mut right = self.block_meta.len() - 1;
         while left < right {

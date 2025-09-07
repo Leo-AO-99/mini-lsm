@@ -48,7 +48,7 @@ impl BlockIterator {
         };
 
         let (key, _) = iter.kv_at_idx(0);
-        iter.first_key = key.to_key_vec();
+        iter.first_key = key;
 
         iter
     }
@@ -94,7 +94,7 @@ impl BlockIterator {
 
         let (key, value_range) = self.kv_at_idx(idx);
 
-        self.key = key.to_key_vec();
+        self.key = key;
         self.value_range = value_range;
     }
 
@@ -115,17 +115,23 @@ impl BlockIterator {
         self.seek_to_idx(self.idx - 1);
     }
 
-    fn kv_at_idx(&self, idx: usize) -> (KeySlice, (usize, usize)) {
+    fn kv_at_idx(&self, idx: usize) -> (KeyVec, (usize, usize)) {
         let offset = self.block.offsets[idx] as usize;
         let mut entry = &self.block.data[offset..];
-        let key_len = entry.get_u16() as usize;
-        let key = &entry[..key_len];
 
-        entry.advance(key_len);
+        let key_overlap_len = entry.get_u16() as usize;
+        let rest_key_len = entry.get_u16() as usize;
+
+        let mut key = Vec::with_capacity(key_overlap_len + rest_key_len);
+        key.extend_from_slice(&self.first_key.raw_ref()[..key_overlap_len]);
+        key.extend_from_slice(&entry[..rest_key_len]);
+        entry.advance(rest_key_len);
+
         let value_len = entry.get_u16() as usize;
-        let value_begin = offset + SIZEOF_U16 + key_len + SIZEOF_U16;
+        let value_begin = offset + SIZEOF_U16 /* key_overlap_len */ + SIZEOF_U16 /* rest_key_len */ + rest_key_len + SIZEOF_U16 /* value_len */;
+
         (
-            KeySlice::from_slice(key),
+            KeyVec::from_vec(key),
             (value_begin, value_begin + value_len),
         )
     }
@@ -139,7 +145,7 @@ impl BlockIterator {
         while low < high {
             let mid = low + (high - low) / 2;
             let (key_at_idx, _) = self.kv_at_idx(mid);
-            match key_at_idx.cmp(&key) {
+            match key_at_idx.raw_ref().cmp(key.raw_ref()) {
                 std::cmp::Ordering::Less => low = mid + 1,
                 std::cmp::Ordering::Greater => high = mid,
                 std::cmp::Ordering::Equal => {
