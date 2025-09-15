@@ -31,6 +31,7 @@ use crate::compact::{
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
 use crate::iterators::StorageIterator as _;
+use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::key::KeySlice;
@@ -337,25 +338,48 @@ impl LsmStorageInner {
             }
         }
 
-        // 3. l0_sstables
-        let mut table_iters = Vec::with_capacity(snapshot.l0_sstables.len());
-        for table_id in snapshot.l0_sstables.iter() {
-            let table = snapshot.sstables[table_id].clone();
+        // SSTables
+        let keep_table = |key: &[u8], table: &SsTable| -> bool {
             if !key_within(key, table.first_key().raw_ref(), table.last_key().raw_ref()) {
-                continue;
+                return false;
             }
             if let Some(bloom) = &table.bloom {
                 if !bloom.may_contain(farmhash::fingerprint32(key)) {
-                    continue;
+                    return false;
                 }
             }
-            table_iters.push(Box::new(SsTableIterator::create_and_seek_to_key(
+
+            true
+        };
+
+        // 3. l0_sstables
+        let mut l0_iters = Vec::with_capacity(snapshot.l0_sstables.len());
+        for table_id in snapshot.l0_sstables.iter() {
+            if !keep_table(key, &snapshot.sstables[table_id]) {
+                continue;
+            }
+            let table = snapshot.sstables[table_id].clone();
+            l0_iters.push(Box::new(SsTableIterator::create_and_seek_to_key(
                 table,
                 KeySlice::from_slice(key),
             )?));
         }
 
-        let table_iter = MergeIterator::create(table_iters);
+        let l0_iter = MergeIterator::create(l0_iters);
+
+        // 4. l1_sstables
+        let mut l1_ssts = Vec::with_capacity(snapshot.levels[0].1.len());
+        for table_id in snapshot.levels[0].1.iter() {
+            if !keep_table(key, &snapshot.sstables[table_id]) {
+                continue;
+            }
+            l1_ssts.push(snapshot.sstables[table_id].clone());
+        }
+
+        let l1_iter =
+            SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(key))?;
+
+        let table_iter = TwoMergeIterator::create(l0_iter, l1_iter)?;
         if table_iter.is_valid()
             && table_iter.key().raw_ref() == key
             && !table_iter.value().is_empty()
@@ -496,8 +520,10 @@ impl LsmStorageInner {
         }
         let memtable_iter = MergeIterator::create(memtable_iters);
 
+        // l0_sstables
+
         // skip the SSTs that is impossible to contain the key/key range.
-        let mut sstable_iters = Vec::with_capacity(snapshot.l0_sstables.len());
+        let mut l0_iters = Vec::with_capacity(snapshot.l0_sstables.len());
         for sstable_id in snapshot.l0_sstables.iter() {
             let sstable = snapshot.sstables[sstable_id].clone();
             if !range_overlap(
@@ -524,12 +550,35 @@ impl LsmStorageInner {
                 }
                 Bound::Unbounded => SsTableIterator::create_and_seek_to_first(sstable)?,
             };
-            sstable_iters.push(Box::new(iter));
+            l0_iters.push(Box::new(iter));
         }
 
-        let sstable_iter = MergeIterator::create(sstable_iters);
+        let l0_iter = MergeIterator::create(l0_iters);
 
-        let iter = TwoMergeIterator::create(memtable_iter, sstable_iter)?;
+        // l1_sstables
+        let mut l1_ssts = Vec::with_capacity(snapshot.levels[0].1.len());
+        for sstable_id in snapshot.levels[0].1.iter() {
+            let sstable = snapshot.sstables[sstable_id].clone();
+            if range_overlap(sstable.first_key().raw_ref(), sstable.last_key().raw_ref(), lower, upper) {
+                l1_ssts.push(sstable);
+            }
+        }
+
+        let l1_iter = match lower {
+            Bound::Included(key) => SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(key))?,
+            Bound::Excluded(key) => {
+                let mut iter = SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(key))?;
+                if iter.is_valid() && iter.key().raw_ref() == key {
+                    iter.next()?;
+                }
+                iter
+            }
+            Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(l1_ssts)?,
+        };
+
+
+        let iter = TwoMergeIterator::create(memtable_iter, l0_iter)?;
+        let iter = TwoMergeIterator::create(iter, l1_iter)?;
         Ok(FusedIterator::new(LsmIterator::new(
             iter,
             map_bound(upper),
