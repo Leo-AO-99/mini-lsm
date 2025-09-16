@@ -559,15 +559,23 @@ impl LsmStorageInner {
         let mut l1_ssts = Vec::with_capacity(snapshot.levels[0].1.len());
         for sstable_id in snapshot.levels[0].1.iter() {
             let sstable = snapshot.sstables[sstable_id].clone();
-            if range_overlap(sstable.first_key().raw_ref(), sstable.last_key().raw_ref(), lower, upper) {
+            if range_overlap(
+                sstable.first_key().raw_ref(),
+                sstable.last_key().raw_ref(),
+                lower,
+                upper,
+            ) {
                 l1_ssts.push(sstable);
             }
         }
 
         let l1_iter = match lower {
-            Bound::Included(key) => SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(key))?,
+            Bound::Included(key) => {
+                SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(key))?
+            }
             Bound::Excluded(key) => {
-                let mut iter = SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(key))?;
+                let mut iter =
+                    SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(key))?;
                 if iter.is_valid() && iter.key().raw_ref() == key {
                     iter.next()?;
                 }
@@ -575,7 +583,6 @@ impl LsmStorageInner {
             }
             Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(l1_ssts)?,
         };
-
 
         let iter = TwoMergeIterator::create(memtable_iter, l0_iter)?;
         let iter = TwoMergeIterator::create(iter, l1_iter)?;
